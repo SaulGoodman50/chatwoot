@@ -10,6 +10,14 @@ class ConversationApi extends ApiClient {
     return axios.get(`${this.url}/${conversationID}/labels`);
   }
 
+  // SDS patch: ghost-text reply suggestion for the reply box. cacheOnly polls
+  // never trigger a fresh generation server-side.
+  getAiSuggestion(conversationID, { cacheOnly = false } = {}) {
+    return axios.get(`${this.url}/${conversationID}/ai_suggestion`, {
+      params: cacheOnly ? { cache_only: 1 } : {},
+    });
+  }
+
   updateLabels(conversationID, labels) {
     return axios.post(`${this.url}/${conversationID}/labels`, { labels });
   }

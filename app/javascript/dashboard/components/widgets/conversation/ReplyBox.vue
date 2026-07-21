@@ -20,7 +20,8 @@ import QuotedEmailPreview from './QuotedEmailPreview.vue';
 import { REPLY_EDITOR_MODES } from 'dashboard/components/widgets/WootWriter/constants';
 import WootMessageEditor from 'dashboard/components/widgets/WootWriter/Editor.vue';
 import AudioRecorder from 'dashboard/components/widgets/WootWriter/AudioRecorder.vue';
-import { AUDIO_FORMATS } from 'shared/constants/messages';
+import { AUDIO_FORMATS, MESSAGE_TYPE } from 'shared/constants/messages';
+import ConversationApi from 'dashboard/api/conversations';
 import { BUS_EVENTS } from 'shared/constants/busEvents';
 import { CMD_AI_ASSIST } from 'dashboard/helper/commandbar/events';
 import {
@@ -137,6 +138,13 @@ export default {
       showArticleSearchPopover: false,
       hasRecordedAudio: false,
       copilotAcceptedMessages: {},
+      // SDS patch: AI ghost suggestion state.
+      ghostSuggestion: '',
+      ghostForMessageId: null,
+      ghostFetchToken: 0,
+      ghostPollTimers: [],
+      ghostNeedsFullFetch: true,
+      aiSuggestionAvailable: true,
     };
   },
   computed: {
@@ -196,6 +204,29 @@ export default {
         getEffectiveChannelType(this.channelType, this.inbox?.medium || '')
       );
       return !!stripped.trim();
+    },
+    // SDS patch: the ghost suggestion only makes sense while the customer is
+    // waiting for a reply and the agent has not started writing one.
+    lastIncomingMessageId() {
+      const messages = this.currentChat?.messages || [];
+      const lastChatMessage = [...messages]
+        .reverse()
+        .find(
+          message =>
+            !message.private &&
+            (message.message_type === MESSAGE_TYPE.INCOMING ||
+              message.message_type === MESSAGE_TYPE.OUTGOING)
+        );
+      return lastChatMessage?.message_type === MESSAGE_TYPE.INCOMING
+        ? lastChatMessage.id
+        : null;
+    },
+    ghostSuggestionForEditor() {
+      if (!this.ghostSuggestion) return '';
+      if (this.isOnPrivateNote || this.isEditorDisabled) return '';
+      if (this.hasMeaningfulEditorContent) return '';
+      if (!this.lastIncomingMessageId) return '';
+      return this.ghostSuggestion;
     },
     isReplyRestricted() {
       return (
@@ -495,7 +526,29 @@ export default {
         this.setToDraft(oldConversationId, this.replyType);
         this.getFromDraft();
         this.resetRecorderAndClearAttachments();
+        this.resetGhostSuggestion();
+        this.ghostNeedsFullFetch = true;
       }
+    },
+    // Opening a conversation does a full fetch (may generate on a cache miss);
+    // a new customer message while it is open only polls the cache, because
+    // the webhook bot is already generating the fresh suggestion.
+    lastIncomingMessageId: {
+      immediate: true,
+      handler(newId) {
+        if (!newId) {
+          this.resetGhostSuggestion();
+          return;
+        }
+        if (this.ghostForMessageId === newId) return;
+        this.ghostSuggestion = '';
+        if (this.ghostNeedsFullFetch) {
+          this.ghostNeedsFullFetch = false;
+          this.fetchAiSuggestion();
+        } else {
+          this.scheduleGhostPolls();
+        }
+      },
     },
     message() {
       // Autosave the current message draft.
@@ -536,6 +589,7 @@ export default {
     emitter.on(CMD_AI_ASSIST, this.executeCopilotAction);
   },
   unmounted() {
+    this.clearGhostPolls();
     document.removeEventListener('paste', this.onPaste);
     document.removeEventListener('keydown', this.handleKeyEvents);
     emitter.off(BUS_EVENTS.TOGGLE_REPLY_TO_MESSAGE, this.onReplyToMessage);
@@ -1247,6 +1301,66 @@ export default {
       this.message = acceptedMessage;
       this.setCopilotAcceptedMessage(acceptedMessage);
     },
+    // SDS patch: ghost-text reply suggestion.
+    resetGhostSuggestion() {
+      this.clearGhostPolls();
+      this.ghostSuggestion = '';
+      this.ghostForMessageId = null;
+    },
+    clearGhostPolls() {
+      this.ghostPollTimers.forEach(clearTimeout);
+      this.ghostPollTimers = [];
+    },
+    // Right after a new customer message the webhook bot is still generating;
+    // poll the cache until its suggestion lands (cacheOnly never generates).
+    scheduleGhostPolls() {
+      this.clearGhostPolls();
+      const delays = [4000, 9000, 15000, 23000, 33000];
+      this.ghostPollTimers = delays.map(delay =>
+        setTimeout(() => {
+          if (!this.ghostSuggestion) {
+            this.fetchAiSuggestion({ cacheOnly: true });
+          }
+        }, delay)
+      );
+    },
+    async fetchAiSuggestion({ cacheOnly = false } = {}) {
+      if (!this.aiSuggestionAvailable || !this.conversationIdByRoute) return;
+      if (!this.lastIncomingMessageId) return;
+      if (!cacheOnly && this.hasMeaningfulEditorContent) return;
+      this.ghostFetchToken += 1;
+      const token = this.ghostFetchToken;
+      const forMessageId = this.lastIncomingMessageId;
+      try {
+        const { data } = await ConversationApi.getAiSuggestion(
+          this.conversationIdByRoute,
+          { cacheOnly }
+        );
+        if (token !== this.ghostFetchToken) return;
+        if (forMessageId !== this.lastIncomingMessageId) return;
+        if (data.enabled === false) {
+          this.aiSuggestionAvailable = false;
+          this.clearGhostPolls();
+          return;
+        }
+        if (data.suggestion) {
+          this.ghostSuggestion = data.suggestion;
+          this.ghostForMessageId = forMessageId;
+          this.clearGhostPolls();
+        }
+      } catch {
+        // Suggestions are best-effort; never bother the agent about them.
+      }
+    },
+    onAcceptGhostSuggestion() {
+      if (!this.ghostSuggestionForEditor) return;
+      this.message = this.ghostSuggestion;
+      this.ghostSuggestion = '';
+      this.$nextTick(() => this.messageEditor?.focusEditorInputField('end'));
+    },
+    onDismissGhostSuggestion() {
+      this.ghostSuggestion = '';
+    },
   },
 };
 </script>
@@ -1350,6 +1464,9 @@ export default {
           allow-signature
           :channel-type="channelType"
           :medium="inbox.medium"
+          :ghost-suggestion="ghostSuggestionForEditor"
+          @accept-ghost-suggestion="onAcceptGhostSuggestion"
+          @dismiss-ghost-suggestion="onDismissGhostSuggestion"
           @typing-off="onTypingOff"
           @typing-on="onTypingOn"
           @focus="onFocus"

@@ -48,6 +48,7 @@ import {
   suggestionsPlugin,
   triggerCharacters,
 } from '@chatwoot/prosemirror-schema/src/mentions/plugin';
+import { createGhostSuggestionPlugin } from './utils/ghostSuggestionPlugin';
 
 import {
   appendSignature,
@@ -95,6 +96,8 @@ const props = defineProps({
   conversationId: { type: Number, default: null },
   medium: { type: String, default: '' },
   focusOnMount: { type: Boolean, default: true },
+  // SDS patch: AI reply suggestion shown as ghost text, accepted with Tab.
+  ghostSuggestion: { type: String, default: '' },
 });
 
 const emit = defineEmits([
@@ -110,6 +113,8 @@ const emit = defineEmits([
   'input',
   'update:modelValue',
   'executeCopilotAction',
+  'acceptGhostSuggestion',
+  'dismissGhostSuggestion',
 ]);
 
 const { t } = useI18n();
@@ -277,12 +282,19 @@ function createSuggestionPlugin({
   });
 }
 
+// Created once so the plugin instance stays stable across state reloads; the
+// getter keeps the decoration in sync with the prop.
+const ghostSuggestionPlugin = createGhostSuggestionPlugin(() =>
+  props.disabled || props.isPrivate ? '' : props.ghostSuggestion
+);
+
 const plugins = computed(() => {
   if (!props.enableSuggestions) {
-    return [];
+    return [ghostSuggestionPlugin];
   }
 
   return [
+    ghostSuggestionPlugin,
     createSuggestionPlugin({
       trigger: '@',
       showMenu: showToolsMenu,
@@ -334,6 +346,18 @@ const sendWithSignature = computed(() => {
 
   return false;
 });
+
+// Decorations are only re-evaluated on a transaction; nudge the view when the
+// ghost suggestion changes outside the editor.
+watch(
+  () => props.ghostSuggestion,
+  () => {
+    if (!editorView) return;
+    editorView.dispatch(
+      editorView.state.tr.setMeta('ghostSuggestionRefresh', true)
+    );
+  }
+);
 
 watch(showUserMentions, updatedValue => {
   emit('toggleUserMention', props.isPrivate && updatedValue);
@@ -722,7 +746,15 @@ function handleLineBreakWhenCmdAndEnterToSendEnabled(event) {
 }
 
 function onKeydown(event) {
+  const ghostActive =
+    Boolean(props.ghostSuggestion) && !props.isPrivate && !props.disabled;
+  if (event.key === 'Tab' && !event.shiftKey && ghostActive) {
+    event.preventDefault();
+    emit('acceptGhostSuggestion');
+    return true;
+  }
   if (isEscape(event)) {
+    if (ghostActive) emit('dismissGhostSuggestion');
     collapseSelection(editorView);
     return true;
   }
@@ -1086,6 +1118,19 @@ useEmitter(BUS_EVENTS.INSERT_INTO_RICH_EDITOR, insertContentIntoEditor);
   [dir='rtl'] & {
     left: auto !important;
     right: 0 !important;
+  }
+}
+
+// SDS patch: AI reply suggestion rendered as ghost text (accept with Tab)
+.ghost-suggestion {
+  @apply text-n-slate-10;
+  white-space: pre-wrap;
+  pointer-events: none;
+  user-select: none;
+
+  .ghost-suggestion--hint {
+    @apply ml-1.5 rounded border border-n-weak px-1 text-xs text-n-slate-9;
+    white-space: nowrap;
   }
 }
 
