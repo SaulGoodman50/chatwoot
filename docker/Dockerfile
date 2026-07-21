@@ -150,3 +150,9 @@ COPY --from=pre-builder /app/.git_sha /app/.git_sha
 WORKDIR /app
 
 EXPOSE 3000
+
+# SDS patch: baked-in start command (Sidekiq + Rails) so Railway deploys with an
+# empty custom start command. See docker/sds-start.sh.
+COPY docker/sds-start.sh /usr/local/bin/sds-start.sh
+RUN chmod +x /usr/local/bin/sds-start.sh
+CMD ["/usr/local/bin/sds-start.sh"]
