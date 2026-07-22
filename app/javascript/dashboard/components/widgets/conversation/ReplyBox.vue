@@ -140,6 +140,7 @@ export default {
       copilotAcceptedMessages: {},
       // SDS patch: AI ghost suggestion state.
       ghostSuggestion: '',
+      ghostLoading: false,
       ghostForMessageId: null,
       ghostFetchToken: 0,
       ghostPollTimers: [],
@@ -227,6 +228,13 @@ export default {
       if (this.hasMeaningfulEditorContent) return '';
       if (!this.lastIncomingMessageId) return '';
       return this.ghostSuggestion;
+    },
+    ghostLoadingForEditor() {
+      if (!this.ghostLoading || this.ghostSuggestion) return false;
+      if (this.isOnPrivateNote || this.isEditorDisabled) return false;
+      if (this.hasMeaningfulEditorContent) return false;
+      if (!this.lastIncomingMessageId) return false;
+      return true;
     },
     isReplyRestricted() {
       return (
@@ -1306,6 +1314,7 @@ export default {
       this.clearGhostPolls();
       this.ghostSuggestion = '';
       this.ghostForMessageId = null;
+      this.ghostLoading = false;
     },
     clearGhostPolls() {
       this.ghostPollTimers.forEach(clearTimeout);
@@ -1315,11 +1324,14 @@ export default {
     // poll the cache until its suggestion lands (cacheOnly never generates).
     scheduleGhostPolls() {
       this.clearGhostPolls();
+      this.ghostLoading = true;
       const delays = [4000, 9000, 15000, 23000, 33000];
-      this.ghostPollTimers = delays.map(delay =>
-        setTimeout(() => {
-          if (!this.ghostSuggestion) {
-            this.fetchAiSuggestion({ cacheOnly: true });
+      this.ghostPollTimers = delays.map((delay, index) =>
+        setTimeout(async () => {
+          if (this.ghostSuggestion) return;
+          await this.fetchAiSuggestion({ cacheOnly: true });
+          if (index === delays.length - 1 && !this.ghostSuggestion) {
+            this.ghostLoading = false;
           }
         }, delay)
       );
@@ -1331,6 +1343,7 @@ export default {
       this.ghostFetchToken += 1;
       const token = this.ghostFetchToken;
       const forMessageId = this.lastIncomingMessageId;
+      if (!cacheOnly) this.ghostLoading = true;
       try {
         const { data } = await ConversationApi.getAiSuggestion(
           this.conversationIdByRoute,
@@ -1340,16 +1353,23 @@ export default {
         if (forMessageId !== this.lastIncomingMessageId) return;
         if (data.enabled === false) {
           this.aiSuggestionAvailable = false;
+          this.ghostLoading = false;
           this.clearGhostPolls();
           return;
         }
         if (data.suggestion) {
           this.ghostSuggestion = data.suggestion;
           this.ghostForMessageId = forMessageId;
+          this.ghostLoading = false;
           this.clearGhostPolls();
+        } else if (!cacheOnly) {
+          this.ghostLoading = false;
         }
       } catch {
         // Suggestions are best-effort; never bother the agent about them.
+        if (!cacheOnly && token === this.ghostFetchToken) {
+          this.ghostLoading = false;
+        }
       }
     },
     onAcceptGhostSuggestion() {
@@ -1360,6 +1380,8 @@ export default {
     },
     onDismissGhostSuggestion() {
       this.ghostSuggestion = '';
+      this.ghostLoading = false;
+      this.clearGhostPolls();
     },
   },
 };
@@ -1465,6 +1487,7 @@ export default {
           :channel-type="channelType"
           :medium="inbox.medium"
           :ghost-suggestion="ghostSuggestionForEditor"
+          :ghost-loading="ghostLoadingForEditor"
           @accept-ghost-suggestion="onAcceptGhostSuggestion"
           @dismiss-ghost-suggestion="onDismissGhostSuggestion"
           @typing-off="onTypingOff"

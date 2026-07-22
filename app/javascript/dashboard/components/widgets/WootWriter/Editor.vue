@@ -98,6 +98,7 @@ const props = defineProps({
   focusOnMount: { type: Boolean, default: true },
   // SDS patch: AI reply suggestion shown as ghost text, accepted with Tab.
   ghostSuggestion: { type: String, default: '' },
+  ghostLoading: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -284,8 +285,9 @@ function createSuggestionPlugin({
 
 // Created once so the plugin instance stays stable across state reloads; the
 // getter keeps the decoration in sync with the prop.
-const ghostSuggestionPlugin = createGhostSuggestionPlugin(() =>
-  props.disabled || props.isPrivate ? '' : props.ghostSuggestion
+const ghostSuggestionPlugin = createGhostSuggestionPlugin(
+  () => (props.disabled || props.isPrivate ? '' : props.ghostSuggestion),
+  () => !props.disabled && !props.isPrivate && props.ghostLoading
 );
 
 const plugins = computed(() => {
@@ -350,7 +352,7 @@ const sendWithSignature = computed(() => {
 // Decorations are only re-evaluated on a transaction; nudge the view when the
 // ghost suggestion changes outside the editor.
 watch(
-  () => props.ghostSuggestion,
+  () => [props.ghostSuggestion, props.ghostLoading],
   () => {
     if (!editorView) return;
     editorView.dispatch(
@@ -748,13 +750,15 @@ function handleLineBreakWhenCmdAndEnterToSendEnabled(event) {
 function onKeydown(event) {
   const ghostActive =
     Boolean(props.ghostSuggestion) && !props.isPrivate && !props.disabled;
+  const ghostBusy =
+    (ghostActive || props.ghostLoading) && !props.isPrivate && !props.disabled;
   if (event.key === 'Tab' && !event.shiftKey && ghostActive) {
     event.preventDefault();
     emit('acceptGhostSuggestion');
     return true;
   }
   if (isEscape(event)) {
-    if (ghostActive) emit('dismissGhostSuggestion');
+    if (ghostBusy) emit('dismissGhostSuggestion');
     collapseSelection(editorView);
     return true;
   }
@@ -1131,6 +1135,48 @@ useEmitter(BUS_EVENTS.INSERT_INTO_RICH_EDITOR, insertContentIntoEditor);
   .ghost-suggestion--hint {
     @apply ml-1.5 rounded border border-n-weak px-1 text-xs text-n-slate-9;
     white-space: nowrap;
+  }
+
+  &.ghost-suggestion--loading {
+    @apply text-n-slate-9;
+    animation: ghost-suggestion-pulse 1.6s ease-in-out infinite;
+  }
+
+  .ghost-suggestion--dots::after {
+    content: '';
+    animation: ghost-suggestion-dots 1.2s steps(1, end) infinite;
+  }
+}
+
+// The empty-editor placeholder is an absolutely-positioned ::before that would
+// render on top of the ghost text (doubled text); hide it while a ghost widget
+// occupies that line.
+.ProseMirror p.empty-node:has(.ghost-suggestion)::before {
+  content: none !important;
+}
+
+@keyframes ghost-suggestion-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes ghost-suggestion-dots {
+  0% {
+    content: '';
+  }
+  25% {
+    content: '.';
+  }
+  50% {
+    content: '..';
+  }
+  75% {
+    content: '...';
   }
 }
 
