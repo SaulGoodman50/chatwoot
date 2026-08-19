@@ -1,5 +1,5 @@
 <script setup>
-import { computed, watch, onMounted, ref } from 'vue';
+import { computed, watch, onMounted, onUnmounted, ref } from 'vue';
 import {
   useMapGetter,
   useFunctionGetter,
@@ -11,7 +11,6 @@ import { FEATURE_FLAGS } from 'dashboard/featureFlags';
 
 import AccordionItem from 'dashboard/components/Accordion/AccordionItem.vue';
 import ContactConversations from './ContactConversations.vue';
-import ConversationAction from './ConversationAction.vue';
 import ConversationParticipant from './ConversationParticipant.vue';
 import ContactInfo from './contact/ContactInfo.vue';
 import ContactNotes from './contact/ContactNotes.vue';
@@ -108,6 +107,59 @@ watch(contactId, (newContactId, prevContactId) => {
   }
 });
 
+// SDS: bestellingen en handelingen uit onze eigen admin, als paneel in de
+// zijbalk. Vervangt het Conversation Actions-blok.
+//
+// Het paneel draait op www.studentdelivery.nl, een subdomein van hetzelfde
+// domein als Chatwoot. Daardoor gaat het sessiecookie van de agent mee en werkt
+// het paneel op zijn eigen adminrechten, inclusief MFA. Wie niet is ingelogd
+// krijgt daar een inlogknop te zien.
+//
+// Chatwoot stuurt zijn appContext alleen naar Dashboard Apps, niet naar een
+// willekeurig iframe. Daarom sturen we hem hier zelf, en beantwoorden we het
+// verzoek dat het paneel doet zodra het geladen is.
+const STELZ_PANE_URL = 'https://www.studentdelivery.nl/internal/customer-pane';
+const STELZ_PANE_ORIGIN = new URL(STELZ_PANE_URL).origin;
+
+// Bewust geen template-ref: dit blok staat in een draggable-slot, en daar bindt
+// Vue een ref binnen een v-for aan een array in plaats van aan het element. We
+// pakken het venster daarom uit de gebeurtenis die het zelf meestuurt.
+let stelzPaneWindow = null;
+
+const sendStelzContext = () => {
+  if (!stelzPaneWindow) return;
+  stelzPaneWindow.postMessage(
+    JSON.stringify({
+      event: 'appContext',
+      data: {
+        contact: contact.value,
+        conversation: currentChat.value,
+      },
+    }),
+    STELZ_PANE_ORIGIN
+  );
+};
+
+const onStelzLoad = event => {
+  stelzPaneWindow = event.target?.contentWindow ?? null;
+  sendStelzContext();
+};
+
+const onStelzMessage = event => {
+  if (event.origin !== STELZ_PANE_ORIGIN) return;
+  if (event.data !== 'chatwoot-dashboard-app:fetch-info') return;
+  // Het paneel vraagt de context op zodra het klaarstaat. Dat verzoek is meteen
+  // de betrouwbaarste bron van zijn venster: bij een herlaadbeurt van het
+  // iframe blijft de oude verwijzing anders hangen.
+  stelzPaneWindow = event.source;
+  sendStelzContext();
+};
+
+// Wisselt de agent van gesprek, dan moet het paneel mee. Zonder dit blijft het
+// de klant van het vorige gesprek tonen, en dat is precies het soort fout dat
+// iemand pas ziet nadat hij al iets geannuleerd heeft.
+watch([contactId, conversationId], () => sendStelzContext());
+
 const onDragEnd = () => {
   dragging.value = false;
   updateUISettings({
@@ -122,7 +174,12 @@ const closeContactPanel = () => {
   });
 };
 
+onUnmounted(() => {
+  window.removeEventListener('message', onStelzMessage);
+});
+
 onMounted(() => {
+  window.addEventListener('message', onStelzMessage);
   conversationSidebarItems.value = conversationSidebarItemsOrder.value;
   getContactDetails();
   store.dispatch('attributes/get', 0);
@@ -151,19 +208,21 @@ onMounted(() => {
       >
         <template #item="{ element }">
           <div
-            v-if="element.name === 'conversation_actions'"
+            v-if="element.name === 'stelz_orders'"
             class="conversation--actions"
           >
             <AccordionItem
-              :title="$t('CONVERSATION_SIDEBAR.ACCORDION.CONVERSATION_ACTIONS')"
-              :is-open="isContactSidebarItemOpen('is_conv_actions_open')"
+              title="Bestellingen"
+              :is-open="isContactSidebarItemOpen('is_stelz_orders_open')"
               @toggle="
-                value => toggleSidebarUIState('is_conv_actions_open', value)
+                value => toggleSidebarUIState('is_stelz_orders_open', value)
               "
             >
-              <ConversationAction
-                :conversation-id="conversationId"
-                :inbox-id="inboxId"
+              <iframe
+                :src="STELZ_PANE_URL"
+                title="Bestellingen en handelingen"
+                class="w-full h-[34rem] border-0 rounded-lg"
+                @load="onStelzLoad"
               />
             </AccordionItem>
           </div>

@@ -2,7 +2,9 @@ import { computed } from 'vue';
 import { useStore, useStoreGetters } from 'dashboard/composables/store';
 
 export const DEFAULT_CONVERSATION_SIDEBAR_ITEMS_ORDER = Object.freeze([
-  { name: 'conversation_actions' },
+  // SDS: vervangt conversation_actions. Teams, labels en prioriteiten worden
+  // hier niet gebruikt, en toewijzen gaat automatisch op de laatste beantwoorder.
+  { name: 'stelz_orders' },
   { name: 'macros' },
   { name: 'conversation_info' },
   { name: 'contact_attributes' },
