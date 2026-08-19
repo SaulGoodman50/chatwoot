@@ -136,11 +136,10 @@ const generalMenuItems = computed(() => {
     });
   }
 
-  items.push({
-    label: t('INTEGRATION_SETTINGS.OPEN_AI.REPLY_OPTIONS.ASK_COPILOT'),
-    key: 'ask_copilot',
-    icon: 'i-fluent-circle-sparkle-24-regular',
-  });
+  // SDS patch: 'Ask Copilot' opent het Captain-copilotpaneel, en dat draait op
+  // de enterprise-backend die wij niet gebruiken. Onze AI-knop levert
+  // samenvatten, antwoord voorstellen en herschrijven via onze eigen endpoint;
+  // deze optie zou alleen een leeg paneel openen, dus we tonen hem niet.
 
   return items;
 });
